@@ -58,7 +58,7 @@ export default function App() {
 
             {/* 3. Screen Flicker (Subtle) */}
             {crtEnabled && (
-                <div className="fixed inset-0 z-[9997] pointer-events-none bg-white opacity-[0.02] animate-pulse" style={{ animationDuration: '0.1s' }} />
+                <div className="fixed inset-0 z-[9997] pointer-events-none bg-white opacity-[0.02] animate-pulse" style={{ animationDuration: '14s' }} />
             )}
 
             <AppContent roomId={roomId} tab={tab} setTab={setTab} crtEnabled={crtEnabled} setCrtEnabled={setCrtEnabled} />
