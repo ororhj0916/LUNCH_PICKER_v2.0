@@ -56,10 +56,24 @@ export default function App() {
                 />
             )}
 
-            {/* 3. Screen Flicker (Subtle) */}
+            {/* 3. Screen Flicker (Rare Glitch) */}
             {crtEnabled && (
-                <div className="fixed inset-0 z-[9997] pointer-events-none bg-white opacity-[0.02] animate-pulse" style={{ animationDuration: '14s' }} />
+              <div
+                className="fixed inset-0 z-[9997] pointer-events-none bg-white opacity-[0.006]"
+                style={{
+                  animation: "crtFlicker 12s infinite",
+                }}
+              />
             )}
+<style>{`
+@keyframes crtFlicker {
+  0%, 92%, 100% { opacity: 0.006; }
+  93% { opacity: 0.02; }
+  93.3% { opacity: 0.008; }
+  94% { opacity: 0.03; }
+  94.2% { opacity: 0.006; }
+}
+`}</style>
 
             <AppContent roomId={roomId} tab={tab} setTab={setTab} crtEnabled={crtEnabled} setCrtEnabled={setCrtEnabled} />
         </div>
