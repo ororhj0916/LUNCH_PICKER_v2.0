@@ -61,18 +61,24 @@ export default function App() {
               <div
                 className="fixed inset-0 z-[9997] pointer-events-none bg-white opacity-[0.006]"
                 style={{
-                  animation: "crtFlicker 12s infinite",
+                  animation: "crtFlicker 6s infinite",
                 }}
               />
             )}
 <style>{`
 @keyframes crtFlicker {
-  0%, 92%, 100% { opacity: 0.006; }
-  93% { opacity: 0.02; }
-  93.3% { opacity: 0.008; }
-  94% { opacity: 0.03; }
-  94.2% { opacity: 0.006; }
+  /* 기본 상태 (거의 안 보임) */
+  0%, 88%, 100% { opacity: 0.006; }
+
+  /* 짧게 지지직! (총 ~0.2~0.3초) */
+  89%   { opacity: 0.03; }
+  89.8% { opacity: 0.008; }
+  90.2% { opacity: 0.045; }
+  90.6% { opacity: 0.012; }
+  91%   { opacity: 0.035; }
+  91.4% { opacity: 0.006; }
 }
+`}</style>
 `}</style>
 
             <AppContent roomId={roomId} tab={tab} setTab={setTab} crtEnabled={crtEnabled} setCrtEnabled={setCrtEnabled} />
