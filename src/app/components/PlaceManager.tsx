@@ -1,6 +1,5 @@
 import React, { useState } from "react";
 import { useLunch, Place, Menu } from "@/hooks/use-lunch";
-import { formatSbError } from "@/lib/supabase";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
 import { toast } from "sonner";
@@ -10,13 +9,14 @@ import {
   ChevronDown, 
   ChevronUp, 
   Check, 
-  X
+  X,
+  Utensils
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "@/lib/utils";
 
 export function PlaceManager({ lunch }: { lunch: ReturnType<typeof useLunch> }) {
-  const { places, menus, loadAll, addPlace, addMenu, updatePlace } = lunch;
+  const { places, menus, addPlace, addMenu } = lunch;
   const [newName, setNewName] = useState("");
   const [newMenus, setNewMenus] = useState("");
   const [isAdding, setIsAdding] = useState(false);
@@ -29,25 +29,14 @@ export function PlaceManager({ lunch }: { lunch: ReturnType<typeof useLunch> }) 
     }
     setIsAdding(true);
     try {
-      let placeId: number;
-      const existing = places.find(p => p.name.toLowerCase() === newName.trim().toLowerCase());
+      const placeId = await addPlace(newName.trim());
       
-      if (existing) {
-        placeId = existing.id;
-        if (!existing.is_active) {
-          await updatePlace(placeId, { is_active: true });
-        }
-      } else {
-        placeId = await addPlace(newName.trim());
-      }
-
       const menuList = newMenus
         .split(/[,\n]+/)
         .map(s => s.trim())
         .filter(Boolean);
 
-      if (menuList.length > 0) {
-        // Sequentially add menus to ensure order/safety
+      if (menuList.length > 0 && placeId) {
         for (const name of menuList) {
             await addMenu(placeId, name);
         }
@@ -56,9 +45,12 @@ export function PlaceManager({ lunch }: { lunch: ReturnType<typeof useLunch> }) 
       toast.success("Saved successfully");
       setNewName("");
       setNewMenus("");
-      await loadAll();
     } catch (err: any) {
-      toast.error(formatSbError(err));
+      if (err.message === "ALREADY_EXISTS") {
+          toast.error("This place is already in the list!");
+      } else {
+          toast.error("Failed to add place");
+      }
     } finally {
       setIsAdding(false);
     }
@@ -79,6 +71,7 @@ export function PlaceManager({ lunch }: { lunch: ReturnType<typeof useLunch> }) 
                 value={newName} 
                 onChange={e => setNewName(e.target.value)} 
                 placeholder="Ex: McDonald's"
+                onKeyDown={e => e.key === "Enter" && handleAdd()}
               />
             </div>
             <div className="space-y-1">
@@ -87,6 +80,7 @@ export function PlaceManager({ lunch }: { lunch: ReturnType<typeof useLunch> }) 
                 value={newMenus}
                 onChange={e => setNewMenus(e.target.value)}
                 placeholder="Burger, Fries, Coke"
+                onKeyDown={e => e.key === "Enter" && handleAdd()}
               />
             </div>
             <div className="pt-5">
@@ -114,8 +108,14 @@ export function PlaceManager({ lunch }: { lunch: ReturnType<typeof useLunch> }) 
             />
           ))}
           {places.length === 0 && (
-            <div className="font-mono text-center py-12 text-gray-500 border-2 border-dashed border-gray-600 bg-black/20">
-              // NO PLACES FOUND
+            <div className="flex flex-col items-center justify-center py-16 px-4 border-4 border-dashed border-gray-700 bg-black/20 rounded-lg text-center gap-4">
+              <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center text-gray-500">
+                  <Utensils className="w-8 h-8" />
+              </div>
+              <div>
+                  <h4 className="text-xl font-bold text-gray-400">NO PLACES YET</h4>
+                  <p className="text-sm text-gray-600 mt-1">Add your favorite lunch spots above!</p>
+              </div>
             </div>
           )}
         </div>
@@ -125,7 +125,7 @@ export function PlaceManager({ lunch }: { lunch: ReturnType<typeof useLunch> }) 
 }
 
 function PlaceItem({ place, allMenus, lunch }: { place: Place, allMenus: Menu[], lunch: ReturnType<typeof useLunch> }) {
-  const { updatePlace, deletePlace, addMenu, updateMenu, loadAll } = lunch;
+  const { togglePlace, deletePlace, addMenu, toggleMenu, updatePlaceName, refresh } = lunch;
   const [isOpen, setIsOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(place.name);
@@ -134,28 +134,21 @@ function PlaceItem({ place, allMenus, lunch }: { place: Place, allMenus: Menu[],
   const placeMenus = allMenus.filter(m => m.place_id === place.id);
   const activeMenus = placeMenus.filter(m => m.is_active);
 
-  const toggleActive = async () => {
-    const next = !place.is_active;
-    await updatePlace(place.id, { is_active: next });
-    
-    // Also toggle menus? Optional. Logic in use-lunch handles filtering inactive places.
-    // But UI might want to show them off.
-    loadAll();
+  const handleToggleActive = async () => {
+    await togglePlace(place.id);
   };
 
   const handleSaveName = async () => {
     if (!editName.trim()) return;
-    await updatePlace(place.id, { name: editName.trim() });
+    await updatePlaceName(place.id, editName.trim());
     setIsEditing(false);
-    loadAll();
   };
 
   const handleAddMenu = async () => {
     if (!newMenuName.trim()) return;
     await addMenu(place.id, newMenuName.trim());
     setNewMenuName("");
-    loadAll();
-    // Focus is kept because component structure doesn't change drastically
+    // Focus kept by React
   };
 
   const handleDelete = async () => {
@@ -215,7 +208,7 @@ function PlaceItem({ place, allMenus, lunch }: { place: Place, allMenus: Menu[],
         <Button 
           size="sm" 
           variant={place.is_active ? "primary" : "secondary"}
-          onClick={toggleActive}
+          onClick={(e) => { e.stopPropagation(); handleToggleActive(); }}
           className={cn("h-8 text-xs font-bold", place.is_active ? "bg-black text-white hover:bg-gray-800" : "bg-gray-200 text-gray-500")}
         >
           {place.is_active ? "ON" : "OFF"}
@@ -240,7 +233,7 @@ function PlaceItem({ place, allMenus, lunch }: { place: Place, allMenus: Menu[],
             <div className="p-4 space-y-4">
               <div className="flex flex-wrap gap-2">
                 {placeMenus.map(menu => (
-                  <MenuItem key={menu.id} menu={menu} updateMenu={updateMenu} loadAll={loadAll} />
+                  <MenuItem key={menu.id} menu={menu} toggleMenu={toggleMenu} />
                 ))}
               </div>
               <div className="flex gap-2 max-w-sm">
@@ -263,10 +256,9 @@ function PlaceItem({ place, allMenus, lunch }: { place: Place, allMenus: Menu[],
   );
 }
 
-function MenuItem({ menu, updateMenu, loadAll }: { menu: Menu, updateMenu: any, loadAll: any }) {
+function MenuItem({ menu, toggleMenu }: { menu: Menu, toggleMenu: any }) {
   const toggle = async () => {
-    await updateMenu(menu.id, { is_active: !menu.is_active });
-    loadAll();
+    await toggleMenu(menu.id);
   };
 
   return (

@@ -2,52 +2,49 @@ import { useEffect, useState, useMemo, useCallback } from "react";
 import { supabase, formatSbError } from "@/lib/supabase";
 import { toast } from "sonner";
 
-// Types based on the schema
+// Types
 export type Place = {
-  id: number;
+  id: string;
   name: string;
   is_active: boolean;
   created_at: string;
 };
 
 export type Menu = {
-  id: number;
-  place_id: number;
+  id: string;
+  place_id: string;
   name: string;
   is_active: boolean;
   created_at: string;
 };
 
-export type PickItem = {
-  id: number;
-  day_key: string;
-  attempt: number;
-  type: "menu" | "place";
-  item_id: number;
-  item_name: string;
-  created_at: string;
+export type HistoryItem = {
+    date: string; // YYYY-MM-DD
+    item_name: string;
+    type: "menu" | "place";
+    place_name?: string;
 };
 
-export type Rating = {
-  id: number;
-  day_key: string;
-  type: "menu" | "place";
-  item_id: number;
-  rating: number;
-  created_at: string;
+export type RoomData = {
+  room_name: string | null;
+  places: Place[];
+  menus: Menu[];
+  history: HistoryItem[];
 };
 
-export type AppState = {
-  id: number;
+export type PickState = {
   day_key: string;
   attempt_count: number;
-  current_pick_type: "menu" | "place" | null;
-  current_pick_item_id: number | null;
-  current_pick_item_name: string | null;
-  current_pick_at: string | null;
-  pick_lock: boolean;
+  current_pick: {
+    type: "menu" | "place";
+    item_id: string;
+    item_name: string;
+    place_name?: string; // Enhanced to store context
+  } | null;
+  timestamp: string;
 };
 
+// Utils
 export function kDayKey() {
   const now = new Date();
   const fmt = new Intl.DateTimeFormat("sv-SE", {
@@ -61,366 +58,270 @@ export function kDayKey() {
 
 const KV_TABLE = "kv_store_a285a6f7";
 
-export function useLunch(room = "global", session = "global") {
-  const [places, setPlaces] = useState<Place[]>([]);
-  const [menus, setMenus] = useState<Menu[]>([]);
-  const [ratings, setRatings] = useState<Rating[]>([]);
-  const [appState, setAppState] = useState<AppState | null>(null);
+export function useLunch(roomId: string) {
+  const [data, setData] = useState<RoomData>({ room_name: null, places: [], menus: [], history: [] });
+  const [pickState, setPickState] = useState<PickState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  const isGlobalRoom = room === "global";
-  const isGlobalSession = session === "global";
-
-  // --- Helpers for KV State ---
-  const getKvState = async (key: string) => {
-    const { data } = await supabase.from(KV_TABLE).select("value").eq("key", key).maybeSingle();
-    return data?.value;
+  // --- KV Helpers ---
+  const getKey = (type: "data" | "state") => {
+    if (type === "state") return `lunch_v3_state:${roomId}:${kDayKey()}`;
+    return `lunch_v3_data:${roomId}`;
   };
 
-  const setKvState = async (key: string, value: any) => {
-    const { error } = await supabase.from(KV_TABLE).upsert({ key, value });
-    if (error) throw error;
-  };
-
-  // --- Initializers ---
-
-  const ensureAppState = async () => {
-    const dayKey = kDayKey();
-    
-    if (isGlobalRoom && isGlobalSession) {
-      // Legacy SQL path
-      const { data, error } = await supabase.from("app_state").select("*").limit(1).maybeSingle();
-      if (error) throw new Error(formatSbError(error));
-      
-      let state = data;
-      if (!state) {
-        const { data: created, error: createError } = await supabase
-          .from("app_state")
-          .insert([{ attempt_count: 0 }])
-          .select()
-          .single();
-        if (createError) throw new Error(formatSbError(createError));
-        state = created;
-      }
-
-      // Normalize Day
-      if (state.day_key !== dayKey) {
-        const { data: up, error: upError } = await supabase
-          .from("app_state")
-          .update({
-            day_key: dayKey,
-            attempt_count: 0,
-            current_pick_type: null,
-            current_pick_item_id: null,
-            current_pick_item_name: null,
-            current_pick_at: null,
-          })
-          .eq("id", state.id)
-          .select()
-          .single();
-        if (upError) throw new Error(formatSbError(upError));
-        state = up;
-      }
-      return state;
-    } else {
-      // KV Path (Private Session)
-      const key = `state:${room}:${session}`;
-      const val = await getKvState(key);
-      
-      const defaultState: AppState = {
-        id: 0, // Mock ID
-        day_key: dayKey,
-        attempt_count: 0,
-        current_pick_type: null,
-        current_pick_item_id: null,
-        current_pick_item_name: null,
-        current_pick_at: null,
-        pick_lock: false
-      };
-
-      if (!val || val.day_key !== dayKey) {
-        // Reset or Init
-        await setKvState(key, defaultState);
-        return defaultState;
-      }
-      return val as AppState;
-    }
-  };
-
-  const loadAll = useCallback(async () => {
+  const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      
-      // 1. Load Data (Places/Menus)
-      if (isGlobalRoom) {
-        const [pRes, mRes, rRes] = await Promise.all([
-          supabase.from("places").select("*").order("created_at", { ascending: false }),
-          supabase.from("menus").select("*").order("created_at", { ascending: false }),
-          supabase.from("ratings").select("*").order("created_at", { ascending: true }),
-        ]);
+      const dataKey = getKey("data");
+      const stateKey = getKey("state");
 
-        if (pRes.error) throw pRes.error;
-        if (mRes.error) throw mRes.error;
-        
-        setPlaces(pRes.data || []);
-        setMenus(mRes.data || []);
-        setRatings(rRes.data || []);
+      const { data: rows, error } = await supabase
+        .from(KV_TABLE)
+        .select("key, value")
+        .in("key", [dataKey, stateKey]);
+
+      if (error) throw error;
+
+      const dataRow = rows?.find(r => r.key === dataKey);
+      const stateRow = rows?.find(r => r.key === stateKey);
+
+      if (dataRow) {
+        // Ensure history exists for older data
+        setData({
+            ...dataRow.value,
+            history: dataRow.value.history || []
+        });
       } else {
-        // Load from KV
-        const pKey = `places:${room}`;
-        const mKey = `menus:${room}`;
-        const [pData, mData] = await Promise.all([
-          getKvState(pKey),
-          getKvState(mKey)
-        ]);
-        setPlaces(pData || []);
-        setMenus(mData || []);
-        setRatings([]); // Ratings not supported in private rooms yet
+        // Init empty room
+        setData({ room_name: null, places: [], menus: [], history: [] });
       }
 
-      // 2. Load State (Pick)
-      const st = await ensureAppState();
-      setAppState(st);
-      setError(null);
+      if (stateRow) {
+        setPickState(stateRow.value);
+      } else {
+        setPickState(null);
+      }
     } catch (err: any) {
       console.error(err);
-      setError(formatSbError(err));
+      toast.error("Failed to load room data");
     } finally {
       setLoading(false);
     }
-  }, [room, session, isGlobalRoom, isGlobalSession]);
+  }, [roomId]);
+
+  const saveData = async (newData: RoomData) => {
+    const key = getKey("data");
+    const { error } = await supabase.from(KV_TABLE).upsert({ key, value: newData });
+    if (error) throw error;
+    setData(newData);
+  };
+
+  const saveState = async (newState: PickState) => {
+    const key = getKey("state");
+    const { error } = await supabase.from(KV_TABLE).upsert({ key, value: newState });
+    if (error) throw error;
+    setPickState(newState);
+  };
 
   useEffect(() => {
-    loadAll();
+    loadData();
+  }, [loadData]);
 
-    // Subscribe to changes if Global
-    if (isGlobalRoom && isGlobalSession) {
-      const ch = supabase
-        .channel("lunch-vA")
-        .on("postgres_changes", { event: "*", schema: "public", table: "places" }, loadAll)
-        .on("postgres_changes", { event: "*", schema: "public", table: "menus" }, loadAll)
-        .on("postgres_changes", { event: "*", schema: "public", table: "app_state" }, loadAll)
-        .subscribe();
+  // --- Actions ---
 
-      return () => {
-        supabase.removeChannel(ch);
-      };
+  const setRoomName = async (name: string) => {
+    await saveData({ ...data, room_name: name });
+  };
+
+  const addPlace = async (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    if (data.places.some(p => p.name.toLowerCase() === trimmed.toLowerCase())) {
+      throw new Error("ALREADY_EXISTS");
     }
-  }, [loadAll, isGlobalRoom, isGlobalSession]);
 
-  // Derived state
-  const placeMap = useMemo(() => new Map(places.map((p) => [p.id, p])), [places]);
+    const newPlace: Place = {
+      id: crypto.randomUUID(),
+      name: trimmed,
+      is_active: true,
+      created_at: new Date().toISOString()
+    };
 
-  const activeMenuPool = useMemo(() => {
-    return menus
-      .filter((m) => m.is_active)
-      .filter((m) => placeMap.get(m.place_id)?.is_active)
-      .map((m) => {
-        const pl = placeMap.get(m.place_id);
-        return {
-          id: m.id,
-          type: "menu" as const,
-          item_id: m.id,
-          item_name: `${m.name} (${pl?.name || ""})`,
-        };
-      });
-  }, [menus, placeMap]);
+    await saveData({
+      ...data,
+      places: [newPlace, ...data.places]
+    });
+    return newPlace.id;
+  };
 
+  const togglePlace = async (id: string) => {
+    const updated = data.places.map(p => p.id === id ? { ...p, is_active: !p.is_active } : p);
+    await saveData({ ...data, places: updated });
+  };
+
+  const deletePlace = async (id: string) => {
+    const updatedPlaces = data.places.filter(p => p.id !== id);
+    const updatedMenus = data.menus.filter(m => m.place_id !== id);
+    await saveData({ ...data, places: updatedPlaces, menus: updatedMenus });
+  };
+
+  const updatePlaceName = async (id: string, newName: string) => {
+      const updated = data.places.map(p => p.id === id ? { ...p, name: newName } : p);
+      await saveData({ ...data, places: updated });
+  }
+
+  const addMenu = async (placeId: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    const newMenu: Menu = {
+      id: crypto.randomUUID(),
+      place_id: placeId,
+      name: trimmed,
+      is_active: true,
+      created_at: new Date().toISOString()
+    };
+
+    await saveData({
+      ...data,
+      menus: [...data.menus, newMenu]
+    });
+  };
+
+  const toggleMenu = async (id: string) => {
+    const updated = data.menus.map(m => m.id === id ? { ...m, is_active: !m.is_active } : m);
+    await saveData({ ...data, menus: updated });
+  };
+
+  // --- Picking Logic ---
+  
   const activePlacePool = useMemo(() => {
-    return places
-      .filter((p) => p.is_active)
-      .map((p) => ({
+    return data.places.filter(p => p.is_active).map(p => ({
         id: p.id,
         type: "place" as const,
-        item_id: p.id,
-        item_name: p.name,
-      }));
-  }, [places]);
+        name: p.name,
+        place_name: p.name
+    }));
+  }, [data.places]);
 
-  const currentPick = useMemo(() => {
-    if (!appState?.current_pick_item_id) return null;
-    return {
-      type: appState.current_pick_type,
-      item_id: appState.current_pick_item_id,
-      item_name: appState.current_pick_item_name,
-    };
-  }, [appState]);
+  const activeMenuPool = useMemo(() => {
+    return data.menus
+        .filter(m => m.is_active)
+        .filter(m => data.places.find(p => p.id === m.place_id)?.is_active)
+        .map(m => {
+            const place = data.places.find(p => p.id === m.place_id);
+            return {
+                id: m.id,
+                type: "menu" as const,
+                name: m.name,
+                place_name: place?.name || "Unknown"
+            };
+        });
+  }, [data.menus, data.places]);
 
   const attemptLeft = useMemo(() => {
-    const c = appState?.attempt_count ?? 0;
-    return Math.max(0, 2 - c);
-  }, [appState]);
-
-  // --- ACTIONS ---
+      return Math.max(0, 2 - (pickState?.attempt_count ?? 0));
+  }, [pickState]);
 
   const pickLunch = async () => {
-    try {
-      const st = await ensureAppState();
-      
-      let attempt = st.attempt_count + 1;
-      if (st.current_pick_item_id && attempt <= st.attempt_count) {
-          attempt = st.attempt_count + 1;
-      }
-      
-      if (st.attempt_count >= 2) {
-          toast.error("Today's retry limit reached!");
-          return;
-      }
-      
-      const useMenus = activeMenuPool.length > 0;
-      const pool = useMenus ? activeMenuPool : activePlacePool;
-      const type = useMenus ? "menu" : "place";
-
-      if (!pool.length) {
-        toast.error("No active menus or places found!");
+    if (attemptLeft <= 0) {
+        toast.error("Retry limit reached for today!");
         return;
-      }
+    }
 
-      const selected = pool[Math.floor(Math.random() * pool.length)];
-      const dayKey = kDayKey();
+    const useMenus = activeMenuPool.length > 0;
+    let pool = useMenus ? activeMenuPool : activePlacePool;
+    const type = useMenus ? "menu" : "place";
 
-      // Update State
-      const newState = {
-        ...st,
+    // --- COOLDOWN LOGIC (Exclude recent 3 days) ---
+    // Extract recent names from history
+    const recentNames = new Set(
+        data.history
+            .slice(0, 3) // Check last 3 entries
+            .map(h => h.item_name.toLowerCase())
+    );
+
+    const originalPoolSize = pool.length;
+    
+    // Filter out recent
+    const filteredPool = pool.filter(item => !recentNames.has(item.name.toLowerCase()));
+    
+    // If filtering removes everything, ignore filter (fallback)
+    if (filteredPool.length > 0) {
+        pool = filteredPool;
+    } else if (originalPoolSize > 0) {
+        toast("Cooldown bypassed: All active items were recently eaten.");
+    }
+
+    if (pool.length === 0) {
+        toast.error("No active items to pick from!");
+        return;
+    }
+
+    const selected = pool[Math.floor(Math.random() * pool.length)];
+    const nextAttempt = (pickState?.attempt_count ?? 0) + 1;
+    const dayKey = kDayKey();
+
+    const newState: PickState = {
         day_key: dayKey,
-        attempt_count: attempt,
-        current_pick_type: type,
-        current_pick_item_id: selected.item_id,
-        current_pick_item_name: selected.item_name,
-        current_pick_at: new Date().toISOString(),
-      };
+        attempt_count: nextAttempt,
+        current_pick: {
+            type,
+            item_id: selected.id,
+            item_name: selected.name,
+            place_name: selected.place_name
+        },
+        timestamp: new Date().toISOString()
+    };
 
-      if (isGlobalRoom && isGlobalSession) {
-        const { error: upError } = await supabase
-          .from("app_state")
-          .update(newState)
-          .eq("id", st.id);
-        if (upError) throw upError;
-      } else {
-        await setKvState(`state:${room}:${session}`, newState);
-      }
-      
-      setAppState(newState);
-      toast.success(attempt === 1 ? "Lunch picked!" : "Retried lunch!");
-      return selected;
-    } catch (err: any) {
-      console.error(err);
-      toast.error(formatSbError(err));
-    }
-  };
+    // Save State (Pick)
+    await saveState(newState);
 
-  const submitRating = async (score: number) => {
-    if (isGlobalRoom && isGlobalSession) {
-        if (!currentPick) return;
-        const dayKey = kDayKey();
-        const { error } = await supabase.from("ratings").insert([
-          {
-            day_key: dayKey,
-            type: currentPick.type,
-            item_id: currentPick.item_id,
-            rating: score,
-          },
-        ]);
-        if (error) toast.error("Failed to save rating");
-        else toast.success("Rating saved!");
-    } else {
-        toast.info("Ratings disabled in private rooms");
-    }
-  };
-  
-  const getAvgRating = (type: string, itemId: number) => {
-      const list = ratings.filter(r => r.type === type && r.item_id === itemId);
-      if(!list.length) return null;
-      const sum = list.reduce((a,b)=>a + b.rating, 0);
-      return (sum / list.length).toFixed(1);
-  };
+    // Save History (Only if it's the 1st attempt, or we update the history entry for today?
+    // Actually, usually "Final Pick" is what matters. 
+    // Since we don't have a "Confirm" button, let's assume the latest pick for the day is the history.)
+    
+    // Update History Logic:
+    // Remove any existing entry for TODAY from history
+    const cleanHistory = data.history.filter(h => h.date !== dayKey);
+    // Add new entry to TOP
+    const newHistoryItem: HistoryItem = {
+        date: dayKey,
+        item_name: selected.name,
+        type: type,
+        place_name: selected.place_name
+    };
+    
+    // Limit history to last 10 items
+    const updatedHistory = [newHistoryItem, ...cleanHistory].slice(0, 10);
+    
+    await saveData({
+        ...data,
+        history: updatedHistory
+    });
 
-  // --- DATA MANAGEMENT (Adapters for PlaceManager) ---
-  
-  const addPlace = async (name: string): Promise<number> => {
-      if (isGlobalRoom) {
-          // SQL
-          const { data, error } = await supabase.from("places").insert([{ name, is_active: true }]).select().single();
-          if (error) throw error;
-          return data.id;
-      } else {
-          // KV
-          const newId = Date.now();
-          const newPlace: Place = { id: newId, name, is_active: true, created_at: new Date().toISOString() };
-          const newPlaces = [newPlace, ...places];
-          await setKvState(`places:${room}`, newPlaces);
-          setPlaces(newPlaces);
-          return newId;
-      }
-  };
-
-  const updatePlace = async (id: number, updates: Partial<Place>) => {
-      if (isGlobalRoom) {
-          await supabase.from("places").update(updates).eq("id", id);
-      } else {
-          const newPlaces = places.map(p => p.id === id ? { ...p, ...updates } : p);
-          await setKvState(`places:${room}`, newPlaces);
-          setPlaces(newPlaces);
-      }
-  };
-
-  const deletePlace = async (id: number) => {
-      if (isGlobalRoom) {
-          await supabase.from("places").delete().eq("id", id);
-      } else {
-          const newPlaces = places.filter(p => p.id !== id);
-          await setKvState(`places:${room}`, newPlaces);
-          setPlaces(newPlaces);
-      }
-  };
-
-  const addMenu = async (placeId: number, name: string) => {
-      if (isGlobalRoom) {
-          await supabase.from("menus").insert([{ place_id: placeId, name, is_active: true }]);
-      } else {
-          const newMenu: Menu = { 
-              id: Date.now() + Math.random(), 
-              place_id: placeId, 
-              name, 
-              is_active: true, 
-              created_at: new Date().toISOString() 
-          };
-          const newMenus = [newMenu, ...menus];
-          await setKvState(`menus:${room}`, newMenus);
-          setMenus(newMenus);
-      }
-  };
-
-  const updateMenu = async (id: number, updates: Partial<Menu>) => {
-      if (isGlobalRoom) {
-          await supabase.from("menus").update(updates).eq("id", id);
-      } else {
-          const newMenus = menus.map(m => m.id === id ? { ...m, ...updates } : m);
-          await setKvState(`menus:${room}`, newMenus);
-          setMenus(newMenus);
-      }
+    return selected;
   };
 
   return {
     loading,
-    error,
-    places,
-    menus,
-    appState,
-    currentPick,
+    roomName: data.room_name,
+    places: data.places,
+    menus: data.menus,
+    history: data.history,
+    currentPick: pickState?.current_pick,
     attemptLeft,
-    pickLunch,
-    submitRating,
-    getAvgRating,
-    loadAll,
-    // Expose management methods
+    
+    // Actions
+    setRoomName,
     addPlace,
-    updatePlace,
+    togglePlace,
     deletePlace,
+    updatePlaceName,
     addMenu,
-    updateMenu,
-    room,
-    session
+    toggleMenu,
+    pickLunch,
+    refresh: loadData
   };
 }
